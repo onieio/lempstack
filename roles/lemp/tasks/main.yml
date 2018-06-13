@@ -1,0 +1,112 @@
+- name: Adding EPEL centos7 repository
+  yum: name=epel-release state=present
+
+- name: Installing nginx 
+  yum: name=nginx state=present
+
+- name: Start and enable Nginx service
+  systemd: name=nginx state=started 
+
+- name: Write the modified nginx.conf
+  template: src=nginx.conf.j2 dest=/etc/nginx/conf.d/nginx.conf
+  notify:
+    - Restart Nginx
+
+- name: Install MariaDB
+  yum: name={{ item }} enablerepo=mariadb state=present
+  with_items:
+    - mariadb-server
+    - mariadb
+
+- name: Start and enable MariaDB service
+  systemd: name=mysql state=started
+
+#ansible-playbook release.yml --extra-vars "mysql_secure_installation=true mysql_root_password=your_very_secret_password"
+- name: Set root Password
+  mysql_user: name=root login_password={{ mysql_root_password }} check_implicit_admin=yes name=root host={{ item }} password={{ mysql_root_password }} state=present 
+  with_items:
+    - localhost
+    - 127.0.0.1
+    - ::1
+
+- name: Remove anonymous users
+  command: 'mysql -ne "{{ item }}"'
+  with_items:
+    - DELETE FROM mysql.user WHERE User=''
+  changed_when: False
+
+- name: Remove test database and access to it
+  command: 'mysql -ne "{{ item }}"'
+  with_items:
+    - DROP DATABASE IF EXISTS test
+    - DELETE FROM mysql.db WHERE Db='test' OR Db='test\\_%'
+  changed_when: False
+
+- name: Create a Database
+  command: 'mysql -ne "{{ item }}"'
+  with_items:
+    - CREATE DATABASE {{ domain }}
+    - CREATE USER {{ wp_dbuser }}@localhost IDENTIFIED BY '{{ password }}'
+    - GRANT ALL PRIVILEGES ON {{ domain }}.* TO {{ wp_dbuser }}@localhost IDENTIFIED BY '{{ password }}'
+  changed_when: False
+
+- name: Reload privilege tables
+  command: 'mysql -ne "{{ item }}"'
+  with_items:
+    - FLUSH PRIVILEGES
+  changed_when: False
+
+- name: Start and enable MariaDB service
+  systemd: name=mysql enabled=yes
+
+- name: Install php php-mysql php-fpm 
+  yum: name={{ item }} state=present
+  with_items:
+    - php
+    - php-mysql
+    - php-fpm
+
+- name: Copy the templates to their respestive destination
+  template: src={{ item.src }} dest={{ item.dest }} owner=root group=root
+  with_items:
+    - { src: 'www.conf.j2', dest: '/etc/php-fpm.d/www.conf' }
+    - { src: 'php.ini.j2', dest: '/etc/php.ini' }
+  notify:
+    - Restart PHP5-FPM
+
+- name: Start and enable php-fpm service
+  systemd: name=php-fpm state=started enabled=yes
+
+- name: Unarchive a file that needs to be downloaded (added in 2.0)
+  unarchive: src=https://wordpress.org/latest.tar.gz dest={{ wordpress_file }} remote_src=yes
+
+- name: mv the directory to domain 
+  command: mv {{ wordpress_dest }} {{ domain }}
+
+- name: Copy wp-config-sample.php to wp-config.php
+  command: cp {{ wordpress_dest }}/{{ domain }}/wp-config-sample.php {{ wordpress_dest }}/{{ domain }}/wp-config.php
+
+- name: Update database credentials in the file
+  replace: dest={{ wordpress_dest }}/{{ domain }}/wp-config.php regexp={{ item.regexp }} replace={{ item.replace }}
+  with_items:
+    - { regexp: 'database_name_here', replace: 'blog' }
+    - { regexp: 'username_here', replace: 'rajendra' }
+    - { regexp: 'password_here', replace: 'password'}
+
+- name: Create mysql database
+  mysql_db: name={{ wp_mysql_db }} state=present
+
+- name: Create mysql user
+  mysql_user: name={{ wp_mysql_user }} password={{ wp_mysql_password }} priv={{ domain }}.*
+
+- name: Restart apache2 server
+  systemd: name=apache2 state=restarted
+
+- name: Ensure Anonymous user(s) are not in the database
+  mysql_user: name='' host={{ item }} state=absent
+  with_items:
+    - localhost
+ 
+- name: Remove the test database
+  mysql_db: name=test state=absent
+
